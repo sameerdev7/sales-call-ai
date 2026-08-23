@@ -1,0 +1,554 @@
+
+
+// Detecting the caption element
+
+// const observer = new MutationObserver((mutations) => {
+//   for (const mutation of mutations) {
+//     for (const node of mutation.addedNodes) {
+//       if (node.nodeType === Node.ELEMENT_NODE) {
+//         console.log("New element: ", node);
+//       }
+//     }
+//   }
+// });
+//
+// observer.observe(document.body, {
+//   childList: true, 
+//   subtree: true
+// })
+//
+console.log("Sales Call AI Loaded.");
+
+let previousCaption = "";
+let sendTimer = null;
+
+const SEND_DELAY = 1500;
+
+
+function readCaption() {
+    const captions = document.querySelectorAll(
+        "div.ygicle.VbkSUe"
+    );
+
+    if (captions.length === 0) {
+        return;
+    }
+
+    const latestCaption =
+        captions[captions.length - 1];
+
+    const currentCaption =
+        latestCaption.innerText.trim();
+
+    if (!currentCaption || currentCaption === previousCaption) {
+        return;
+    }
+
+    console.log("[LIVE]", currentCaption);
+
+    clearTimeout(sendTimer);
+
+    sendTimer = setTimeout(() => {
+        processCaption(currentCaption);
+    }, SEND_DELAY);
+}
+
+
+function processCaption(currentCaption) {
+
+    let newText = currentCaption;
+
+    /*
+     * If Meet's current caption starts with
+     * the previous caption, remove the previous
+     * portion and keep only the new text.
+     */
+    if (currentCaption.startsWith(previousCaption)) {
+        newText = currentCaption
+            .slice(previousCaption.length)
+            .trim();
+    }
+
+    if (!newText) {
+        previousCaption = currentCaption;
+        return;
+    }
+
+    console.log("[NEW TEXT]", newText);
+
+    sendToBackend(newText);
+
+    previousCaption = currentCaption;
+}
+
+
+function sendToBackend(text) {
+
+    console.log("[SEND]", text);
+
+    chrome.runtime.sendMessage({
+        type: "transcript",
+        text: text,
+        timestamp: Date.now()
+    });
+}
+
+
+const observer = new MutationObserver(() => {
+    readCaption();
+});
+
+
+observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true
+});
+
+// Sales AI Widget 
+
+let meetingStartTime = null;
+let widgetMinimized = false;
+
+function createWidget() {
+    if (document.getElementById("sales-ai-widget")) {
+        return;
+    }
+
+    const widget = document.createElement("div");
+
+    widget.id = "sales-ai-widget"; 
+
+    widget.innerHTML = `
+        <div class="sales-ai-header">
+
+            <div class="sales-ai-heading">
+                <div class="sales-ai-title">
+                    ✦ Sales AI
+                </div>
+
+                <div class="sales-ai-status">
+                    <span class="sales-ai-dot"></span>
+                    Live
+                </div>
+            </div>
+
+            <button
+                id="sales-ai-toggle"
+                class="sales-ai-toggle"
+                title="Minimize"
+            >
+                −
+            </button>
+
+        </div>
+
+        <div
+            id="sales-ai-content"
+            class="sales-ai-content"
+        >
+
+            <div class="sales-ai-label">
+                CONVERSATION TIMELINE
+            </div>
+
+            <div
+                id="sales-ai-timeline"
+                class="sales-ai-timeline"
+            >
+                <div class="sales-ai-empty">
+                    Waiting for conversation...
+                </div>
+            </div>
+
+        </div>
+    `;
+
+    document.body.appendChild(widget);
+
+    const style = document.createElement("style");
+
+    style.textContent = `
+
+        #sales-ai-widget {
+
+            position: fixed;
+
+            top: 20px;
+            right: 20px;
+
+            width: 25vw;
+            min-width: 300px;
+            max-width: 430px;
+
+            height: 55vh;
+            max-height: 650px;
+
+            background: #111318;
+            color: #f5f5f5;
+
+            border: 1px solid #2d313a;
+            border-radius: 14px;
+
+            box-shadow:
+                0 10px 35px rgba(0, 0, 0, 0.40);
+
+            font-family:
+                Inter,
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+
+            z-index: 2147483647;
+
+            overflow: hidden;
+
+            display: flex;
+            flex-direction: column;
+
+            transition:
+                width 0.15s ease,
+                height 0.15s ease;
+        }
+
+
+        .sales-ai-header {
+
+            min-height: 62px;
+
+            padding: 12px 14px 12px 18px;
+
+            border-bottom:
+                1px solid #2d313a;
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: space-between;
+        }
+
+
+        .sales-ai-heading {
+            min-width: 0;
+        }
+
+
+        .sales-ai-title {
+
+            font-size: 15px;
+
+            font-weight: 600;
+        }
+
+
+        .sales-ai-status {
+
+            margin-top: 4px;
+
+            display: flex;
+
+            align-items: center;
+
+            gap: 6px;
+
+            font-size: 11px;
+
+            color: #8f96a3;
+        }
+
+
+        .sales-ai-dot {
+
+            width: 7px;
+            height: 7px;
+
+            border-radius: 50%;
+
+            background: #4ade80;
+
+            display: inline-block;
+        }
+
+
+        .sales-ai-toggle {
+
+            width: 30px;
+            height: 30px;
+
+            border: none;
+            border-radius: 7px;
+
+            background: transparent;
+
+            color: #9ca3af;
+
+            font-size: 20px;
+
+            cursor: pointer;
+        }
+
+
+        .sales-ai-toggle:hover {
+
+            background: #242832;
+            color: white;
+        }
+
+
+        .sales-ai-content {
+
+            flex: 1;
+
+            min-height: 0;
+
+            display: flex;
+
+            flex-direction: column;
+
+            padding: 16px;
+        }
+
+
+        .sales-ai-label {
+
+            flex-shrink: 0;
+
+            font-size: 10px;
+
+            font-weight: 600;
+
+            letter-spacing: 0.08em;
+
+            color: #8f96a3;
+
+            margin-bottom: 12px;
+        }
+
+
+        .sales-ai-timeline {
+
+            flex: 1;
+
+            min-height: 0;
+
+            overflow-y: auto;
+
+            padding-right: 6px;
+        }
+
+
+        .sales-ai-timeline::-webkit-scrollbar {
+
+            width: 5px;
+        }
+
+
+        .sales-ai-timeline::-webkit-scrollbar-thumb {
+
+            background: #363b45;
+
+            border-radius: 10px;
+        }
+
+
+        .sales-ai-entry {
+
+            padding: 12px 0;
+
+            border-bottom:
+                1px solid #252932;
+        }
+
+
+        .sales-ai-entry:first-child {
+
+            padding-top: 0;
+        }
+
+
+        .sales-ai-time {
+
+            font-size: 11px;
+
+            font-weight: 600;
+
+            color: #7f8795;
+
+            margin-bottom: 6px;
+        }
+
+
+        .sales-ai-entry-text {
+
+            font-size: 13px;
+
+            line-height: 1.55;
+
+            color: #e5e7eb;
+        }
+
+
+        .sales-ai-empty {
+
+            font-size: 13px;
+
+            line-height: 1.5;
+
+            color: #7f8795;
+        }
+
+
+        #sales-ai-widget.sales-ai-minimized {
+
+            width: 125px;
+
+            height: 48px;
+
+            min-width: 125px;
+
+            max-width: 125px;
+
+            border-radius: 10px;
+        }
+
+
+        #sales-ai-widget.sales-ai-minimized
+        .sales-ai-header {
+
+            min-height: 48px;
+
+            padding: 8px 10px;
+        }
+
+
+        #sales-ai-widget.sales-ai-minimized
+        .sales-ai-status {
+
+            display: none;
+        }
+
+
+        #sales-ai-widget.sales-ai-minimized
+        .sales-ai-toggle {
+
+            font-size: 18px;
+        }
+
+
+        #sales-ai-widget.sales-ai-minimized
+        .sales-ai-content {
+
+            display: none;
+        }
+
+    `;
+
+    document.head.appendChild(style);
+
+    const toggle = document.getElementById("sales-ai-toggle");
+
+    toggle.addEventListener("click", () => {
+        widgetMinimized = !widgetMinimized;
+
+        if (widgetMinimized) {
+            widget.classList.add(
+                "sales-ai-minimized"
+            );
+
+            toggle.textContent = "+";
+
+            toggle.title = "Expand";
+        } else {
+            widget.classList.remove(
+                "sales-ai-minimized"
+            );
+
+            toggle.textContent = "-";
+
+            toggle.title = "Minimize";
+        }
+    });
+}
+
+function formatMeetingTime(timestamp) {
+    if (!meetingStartTime) {
+        return "00:00"; 
+    }
+
+    const elapsed = Math.max(
+        0, 
+        timestamp - meetingStartTime 
+    ); 
+
+    const totalSeconds = Math.floor(elapsed / 1000); 
+
+    const minutes = Math.floor(totalSeconds / 60);
+
+    const seconds = totalSeconds % 60; 
+
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;   
+}
+
+function addSummaryToTimeline(summary, timestamp) {
+    const timeline = document.getElementById("sales-ai-timeline");
+
+    if (!timeline) {
+        return;
+    }
+
+    const empty = timeline.querySelector(".sales-ai-empty");
+
+    if (empty) {
+        empty.remove();
+    }
+
+    const entry = document.createElement("div");
+
+    entry.className = "sales-ai-entry";
+
+    const time = document.createElement("div");
+
+    time.className = "sales-ai-time";
+
+    time.textContent = formatMeetingTime(timestamp);
+
+    const text = document.createElement("div");
+
+    text.className = "sales-ai-entry-text";
+
+    text.textContent = summary;
+
+    entry.appendChild(time);
+    entry.appendChild(text);
+
+    timeline.prepend(entry);
+}
+
+createWidget();
+
+
+chrome.runtime.onMessage.addListener((message) => {
+
+    if (message.type !== "summary") {
+        return;
+    }
+
+    console.log(
+        "[AI SUMMARY]",
+        message.summary
+    );
+
+    const timestamp =
+        message.timestamp || Date.now();
+
+    if (!meetingStartTime) {
+        meetingStartTime = timestamp;
+    }
+
+    addSummaryToTimeline(
+        message.summary,
+        timestamp
+    );
+});
