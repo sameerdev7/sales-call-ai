@@ -1,19 +1,16 @@
-import os 
+import os
 import subprocess
 import tempfile
 
-from openai import OpenAI 
+from stt import transcribe_with_fallback
 
-openai_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY")
-)
 
 def convert_to_wav(input_path: str, output_path: str):
     """
-    Convert browser WebM/Opus audio into 
+    Convert browser WebM/Opus audio into
     a standard mono 16kHz WAV file
     """
-    
+
     subprocess.run(
         [
             "ffmpeg",
@@ -25,42 +22,35 @@ def convert_to_wav(input_path: str, output_path: str):
             "-ac",
             "1",
             output_path,
-        ], 
+        ],
         check=True,
         capture_output=True,
-        text=True, 
+        text=True,
     )
-    
+
+
 def transcribe_audio(audio_path: str):
     """
-    Transcribe and diarize the final recording. 
-    Returns the raw openai transaction response 
+    Transcribe the final recording through the provider
+    chain (OpenAI first, Ollama fallback).
+    Returns (normalized_segments, provider_name).
     """
-    
-    with open(audio_path, "rb") as audio_file:
-        response = (openai_client.audio.transcriptions.create(
-            model="gpt-4o-transcribe-diarize", 
-            file=audio_file,
-            response_format="diarized_json", 
-        ))
-        
-    return response 
-    
-    
+
+    return transcribe_with_fallback(audio_path)
+
+
 def process_audio(audio_bytes: bytes):
     with tempfile.TemporaryDirectory() as temp_dir:
         webm_path = os.path.join(
-            temp_dir, 
+            temp_dir,
             "meeting.webm"
         )
-        
+
         wav_path = os.path.join(temp_dir, "meeting.wav")
-        
+
         with open(webm_path, "wb") as f:
             f.write(audio_bytes)
-            
+
         convert_to_wav(webm_path, wav_path)
-        
-        transcription = transcribe_audio(wav_path)
-        
-        return transcription
+
+        return transcribe_audio(wav_path)

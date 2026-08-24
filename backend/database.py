@@ -6,8 +6,8 @@ from pymongo import MongoClient
 
 load_dotenv()
 
-client = MongoClient(os.getenv("MONGOD_URI"))
+client = MongoClient(os.getenv("MONGODB_URI"))
 
-db = client[os.getenv("MONGOD_DB", "sales_call_ai")]
+db = client[os.getenv("MONGODB_DB", "sales_call_ai")]
 
 calls = db["calls"]

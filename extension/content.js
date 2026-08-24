@@ -19,20 +19,54 @@
 //
 console.log("Sales Call AI Loaded.");
 
-chrome.runtime.sendMessage({
-    type: "meet_session_started"
-});
+/*
+ * Meeting lifecycle:
+ * Recording starts on the FIRST genuine caption
+ * (architecture.md §8) and ends when the user
+ * actually leaves the call (architecture.md §9).
+ * beforeunload is only a fallback signal.
+ */
 
-window.addEventListener("beforeunload", () => {
+let meetCallDetected = false;
+let sessionEnded = false;
+
+function startSession() {
+    meetCallDetected = true;
+    sessionEnded = false;
+
+    chrome.runtime.sendMessage({
+        type: "meet_session_started"
+    });
+
+    console.log("[MEET] Session started (first caption).");
+}
+
+function endSession() {
+    if (sessionEnded || !meetCallDetected) {
+        return;
+    }
+
+    sessionEnded = true;
+    meetCallDetected = false;
+
     chrome.runtime.sendMessage({
         type: "meet_session_ended"
     });
+
+    console.log("[MEET] Session ended.");
+}
+
+window.addEventListener("beforeunload", () => {
+    endSession();
 });
 
 let previousCaption = "";
 let sendTimer = null;
 
 const SEND_DELAY = 1500;
+
+const CAPTION_SELECTOR =
+    "div.ygicle.VbkSUe";
 
 
 function readCaption() {
@@ -84,6 +118,10 @@ function readCaption() {
 
     console.log("[NEW TEXT]", newText);
 
+    // First genuine caption starts the session (once).
+    if (!meetCallDetected || sessionEnded) {
+        startSession();
+    }
 
     clearTimeout(sendTimer);
 
@@ -148,13 +186,72 @@ observer.observe(document.body, {
     characterData: true
 });
 
+/*
+ * Call-end detection:
+ * 1. Primary: user clicks the leave button
+ *    (matched by aria-label, not class names).
+ * 2. Confirmation: the caption UI must actually be
+ *    torn down within a short window afterwards.
+ * 3. Fallback: beforeunload (page close/reload).
+ */
+
+const LEAVE_LABEL_PATTERN =
+    /^(leave|end)\s+(the\s+)?(call|meeting)$/;
+
+let endConfirmTimer = null;
+
+document.addEventListener(
+    "click",
+    (event) => {
+        if (!meetCallDetected || sessionEnded) {
+            return;
+        }
+
+        const target = event.target;
+        const button = (
+            target && typeof target.closest === "function"
+        )
+            ? target.closest("button[aria-label]")
+            : null;
+
+        if (!button) {
+            return;
+        }
+
+        const label = (
+            button.getAttribute("aria-label") || ""
+        ).trim().toLowerCase();
+
+        if (!LEAVE_LABEL_PATTERN.test(label)) {
+            return;
+        }
+
+        console.log("[MEET] Leave button clicked, confirming...");
+
+        clearTimeout(endConfirmTimer);
+
+        endConfirmTimer = setTimeout(() => {
+            const captionsGone = document.querySelectorAll(
+                CAPTION_SELECTOR
+            ).length === 0;
+
+            if (captionsGone) {
+                endSession();
+            } else {
+                console.log(
+                    "[MEET] Call UI still active after leave click, ignoring."
+                );
+            }
+        }, 1500);
+    },
+    true
+);
+
 // Sales AI Widget 
 
 // ==================================================
 // Sales AI Widget
 // ==================================================
-
-let meetingStartTime = null;
 
 let widgetMinimized = false;
 
@@ -767,11 +864,16 @@ function createWidget() {
     );
 
 
-    // Snapshot buttons 
+    // Snapshot buttons
     document.querySelectorAll(".snapshot-controls button")
         .forEach(button => {
             button.addEventListener("click", () => {
                     const minutes = Number(button.dataset.minutes);
+
+                    if (button.classList.contains("active")) {
+                        return;
+                    }
+
                     document.querySelectorAll(".snapshot-controls button")
                         .forEach(
                             otherButton => {
@@ -802,14 +904,12 @@ function createWidget() {
 }
 
 
-// Meeting relative timestamp 
-function formatMeetingTime(timestamp) {
-    if (!meetingStartTime) {
-        return "00:00";
-    }
-
-    const elapsed = Math.max(0, timestamp - meetingStartTime);
-    const totalSeconds = Math.floor(elapsed / 1000);
+// Format a meeting-relative millisecond offset as MM:SS
+function formatMeetingTime(relativeMs) {
+    const totalSeconds = Math.max(
+        0,
+        Math.floor((relativeMs || 0) / 1000)
+    );
 
     const minutes = Math.floor(totalSeconds / 60);
 
@@ -870,11 +970,6 @@ chrome.runtime.onMessage.addListener(
         if (message.type === "summary") {
             console.log("[AI CURRENT SUMMARY]", message.summary);
 
-            const timestamp = message.timestamp || Date.now();
-
-            if (!meetingStartTime) {
-                meetingStartTime = timestamp;
-            }
             updateCurrentSummary(message.summary);
         }
 
@@ -883,15 +978,11 @@ chrome.runtime.onMessage.addListener(
         if (message.type === "snapshot") {
             console.log("[AI SNAPSHOT]", message.summary);
 
-            const timestamp = message.timestamp || Date.now();
-            if (!meetingStartTime) {
-                // Snapshot timestamps are meeting-relative,
-                // so this fallback is only for safety.
-                meetingStartTime =
-                    Date.now() -
-                    timestamp;
-            }
-            addSnapshotToHistory(message.summary, timestamp);
+            // message.timestamp is meeting-relative ms (backend)
+            addSnapshotToHistory(
+                message.summary,
+                message.timestamp
+            );
         }
     }
 );

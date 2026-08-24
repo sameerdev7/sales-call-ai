@@ -1,0 +1,14 @@
+[project]
+name = "sales-call-ai-backend"
+version = "0.1.0"
+description = "Sales Call AI - FastAPI backend for Google Meet sales call assistance"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pymongo>=4.8",
+    "python-dotenv>=1.0",
+    "python-multipart>=0.0.9",
+    "google-genai>=1.0",
+    "openai>=1.40",
+]
