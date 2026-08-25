@@ -8,7 +8,9 @@
   "permissions": [
     "storage", 
     "tabCapture", 
-    "offscreen"
+    "offscreen",
+    "alarms", 
+    "activeTab"
   ],
 
   "host_permissions": [
@@ -17,6 +19,10 @@
 
   "background": {
     "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_title": "Click to start recording this Meet call"
   },
 
   "content_scripts": [

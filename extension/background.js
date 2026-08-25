@@ -163,6 +163,22 @@ function connectWebSocket() {
 
 connectWebSocket();
 
+if (chrome.alarms) {
+    chrome.alarms.create("keepalive", { periodInMinutes: 0.4 });
+
+    chrome.alarms.onAlarm.addListener((alarm) => {
+        if (alarm.name === "keepalive") {
+            if (!socket || socket.readyState !== WebSocket.OPEN) {
+                connectWebSocket();
+            }
+        }
+    });
+} else {
+    console.warn(
+        "[Sales AI] chrome.alarms unavailable - " + "reload the extension from chrome://extensions"
+    );
+}
+
 // Offscreen Document 
 
 async function ensureOffscreenDocument() {
@@ -388,8 +404,8 @@ chrome.runtime.onMessage.addListener(
 
                 console.log("[MEET] Session started.", activeTabId);
 
-                ensureMeetingId(activeTabId)
-                    .then(() => startAudioRecording());
+                ensureMeetingId(activeTabId);
+
             }
         }
 
@@ -417,6 +433,14 @@ chrome.runtime.onMessage.addListener(
 
     }
 );
+
+// click listener 
+chrome.action.onClicked.addListener(async (tab) => {
+    activeTabId = tab.id; 
+
+    await ensureMeetingId(tab.id);
+    await startAudioRecording();
+})
 
 // Upload Audio to Backend
 

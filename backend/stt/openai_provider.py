@@ -32,6 +32,7 @@ class OpenAIDiarizedProvider(STTProvider):
                 model=STT_MODEL,
                 file=audio_file,
                 response_format="diarized_json",
+                chunking_strategy="auto",
             )
 
         segments = []

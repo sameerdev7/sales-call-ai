@@ -240,26 +240,51 @@ async def websocket_endpoint(websocket: WebSocket):
     async def adopt_meeting(incoming_id):
         previous_id = state["meeting_id"]
 
-        state["meeting_id"] = incoming_id
-        state["started_at"] = time.time()
-        state["current_summary"] = ""
-        state["buffer"] = []
-        state["last_summary_time"] = time.time()
-        state["last_snapshot_time"] = time.time()
-        state["meeting_ended"] = False
+        # If this meeting_id already has a document, this is a
+        # RECONNECT (e.g. MV3 service-worker teardown), not a new
+        # meeting. Rehydrate state instead of wiping it — otherwise
+        # current_summary and the snapshot timer reset every time the
+        # extension's service worker restarts mid-call, which is why
+        # snapshots were never firing.
+        existing = calls.find_one({"meeting_id": incoming_id})
 
-        # drop the unused provisional document, if any
-        calls.delete_one({
-            "meeting_id": previous_id,
-            "segments": {"$size": 0},
-        })
+        if existing:
+            state["meeting_id"] = incoming_id
+            state["started_at"] = existing.get("started_at", time.time())
+            state["current_summary"] = existing.get("current_summary", "")
+            state["buffer"] = []
+            state["last_summary_time"] = time.time()
+            state["snapshot_interval"] = existing.get(
+                "snapshot_interval", DEFAULT_SNAPSHOT_INTERVAL
+            )
+            state["last_snapshot_time"] = existing.get(
+                "last_snapshot_wall_time", time.time()
+            )
+            state["meeting_ended"] = bool(existing.get("ended_at"))
+            state["doc_created"] = True
+
+            print(f"[WS] Reconnected to existing meeting: {incoming_id}")
+        else:
+            state["meeting_id"] = incoming_id
+            state["started_at"] = time.time()
+            state["current_summary"] = ""
+            state["buffer"] = []
+            state["last_summary_time"] = time.time()
+            state["last_snapshot_time"] = time.time()
+            state["meeting_ended"] = False
+
+            # drop the unused provisional document, if any
+            calls.delete_one({
+                "meeting_id": previous_id,
+                "segments": {"$size": 0},
+            })
+
+            ensure_call_doc()
+
+            print(f"[WS] Adopted new meeting: {incoming_id}")
 
         active_connections.pop(previous_id, None)
         active_connections[incoming_id] = websocket
-
-        ensure_call_doc()
-
-        print(f"[WS] Adopted meeting: {incoming_id}")
 
         await websocket.send_json({
             "type": "meeting_started",
@@ -296,6 +321,9 @@ async def websocket_endpoint(websocket: WebSocket):
             {
                 "$push": {
                     "segments": segment
+                }, 
+                "$set": {
+                    "last_snapshot_wall_time": current_time
                 }
             }
         )
@@ -324,37 +352,42 @@ async def websocket_endpoint(websocket: WebSocket):
             "\n[LIVE SUMMARY] "
             "Sending buffered conversation to Gemini..."
         )
+        
+        try:
 
-        response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents=f"""
-            You are a real-time meeting summarization assistant.
+            response = client.models.generate_content(
+                model="gemini-3.5-flash-lite",
+                contents=f"""
+                You are a real-time meeting summarization assistant.
 
-            Update the running summary of the conversation.
+                Update the running summary of the conversation.
 
-            Previous summary:
-            {state['current_summary']}
+                Previous summary:
+                {state['current_summary']}
 
-            New conversation:
-            {buffered_text}
+                New conversation:
+                {buffered_text}
 
-            Instructions:
-            - Update the previous summary using the new conversation.
-            - Preserve important context.
-            - Focus on what is actually being discussed.
-            - Capture the overall flow and substance.
-            - Do not invent or assume information.
-            - Remove conversational filler.
-            - Keep it concise for a small live widget.
-            - Return ONLY the updated natural-language summary.
-            """
-        )
+                Instructions:
+                - Update the previous summary using the new conversation.
+                - Preserve important context.
+                - Focus on what is actually being discussed.
+                - Capture the overall flow and substance.
+                - Do not invent or assume information.
+                - Remove conversational filler.
+                - Keep it concise for a small live widget.
+                - Return ONLY the updated natural-language summary.
+                """
+            )
 
-        new_summary = (
-            response.text.strip()
-            if response.text
-            else ""
-        )
+            new_summary = (
+                response.text.strip()
+                if response.text
+                else ""
+            )
+        except Exception as e:
+            print("[GEMINI] Live summary generation failed:", repr(e))
+            new_summary = ""
 
         if new_summary:
             state["current_summary"] = new_summary
@@ -417,25 +450,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 # snapshot interval
                 if message_type == "snapshot_interval":
                     minutes = message.get(
-                        "minutes",
+                        "minutes", 
                         DEFAULT_SNAPSHOT_INTERVAL
                     )
-
-                    # Ignore duplicate/no-op interval changes;
-                    # do NOT reset the running snapshot timer,
-                    # the new threshold simply applies to the
-                    # next due snapshot.
-                    if (
-                        minutes in ALLOWED_SNAPSHOT_INTERVALS
-                        and minutes != state["snapshot_interval"]
-                    ):
+                    
+                    if (minutes in ALLOWED_SNAPSHOT_INTERVALS and minutes != state["snapshot_interval"]):
                         state["snapshot_interval"] = minutes
-
+                        
+                        calls.update_one(
+                            {"meeting_id": state["meeting_id"]}, 
+                            {"$set": {"snapshot_interval": minutes}}
+                        )
+                        
                         print(
                             f"[SNAPSHOT] Interval changed to "
                             f"{state['snapshot_interval']} minutes"
                         )
-
+                        
                     continue
 
                 # Meeting end marker from the extension.

@@ -87,7 +87,7 @@ async function startRecording(streamId) {
             mediaRecorder = null;
         };
 
-        mediaRecorder.start(1000);
+        mediaRecorder.start();
 
     } catch (error) {
         console.error("[AUDIO] Failed to start.", error);

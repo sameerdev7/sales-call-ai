@@ -959,6 +959,16 @@ function addSnapshotToHistory(summary, timestamp) {
 
 createWidget();
 
+function showRecordingPrompt() {
+    const status = document.querySelector(".sales-ai-status");
+    if (status) {
+        status.textContent = "Click extension icon to record";
+        status.style.color = "#f59e0b"
+    }
+}
+
+showRecordingPrompt();
+
 
 // Backend Messages
 
@@ -983,6 +993,14 @@ chrome.runtime.onMessage.addListener(
                 message.summary,
                 message.timestamp
             );
+        }
+
+        if (message.type === "audio_recording_started") {
+            const status = document.querySelector(".sales-ai-status");
+            if (status) {
+                status.textContent = "Live";
+                status.style.color = "";
+            }
         }
     }
 );
