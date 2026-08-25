@@ -30,6 +30,9 @@ console.log("Sales Call AI Loaded.");
 let meetCallDetected = false;
 let sessionEnded = false;
 
+let pendingDownloadUrls = null;
+let pendingMeetingId = null;
+
 function startSession() {
     meetCallDetected = true;
     sessionEnded = false;
@@ -842,6 +845,181 @@ function createWidget() {
 
         }
 
+
+        /* ==========================================
+           DOWNLOAD PICKER
+           ========================================== */
+
+        .sales-ai-download-picker {
+
+            display: flex;
+
+            flex-direction: column;
+
+            align-items: center;
+
+            justify-content: center;
+
+            gap: 14px;
+
+            padding: 24px 16px;
+
+            text-align: center;
+
+            flex: 1;
+
+        }
+
+
+        .sales-ai-download-icon {
+
+            font-size: 32px;
+
+            opacity: 0.8;
+
+        }
+
+
+        .sales-ai-download-title {
+
+            font-size: 14px;
+
+            font-weight: 600;
+
+            color: #f5f5f5;
+
+        }
+
+
+        .sales-ai-download-subtitle {
+
+            font-size: 12px;
+
+            color: #8f96a3;
+
+            margin-top: -8px;
+
+        }
+
+
+        .sales-ai-download-buttons {
+
+            display: flex;
+
+            gap: 10px;
+
+            margin-top: 4px;
+
+        }
+
+
+        .sales-ai-download-btn {
+
+            padding: 8px 18px;
+
+            border-radius: 8px;
+
+            border: 1px solid #343945;
+
+            background: #1a1d24;
+
+            color: #e5e7eb;
+
+            font-size: 12px;
+
+            font-weight: 500;
+
+            cursor: pointer;
+
+            transition: background 0.15s, color 0.15s;
+
+        }
+
+
+        .sales-ai-download-btn:hover {
+
+            background: #2d3340;
+
+            color: white;
+
+        }
+
+
+        .sales-ai-download-btn.sales-ai-btn-pdf {
+
+            background: #2563eb;
+
+            border-color: #2563eb;
+
+            color: white;
+
+        }
+
+
+        .sales-ai-download-btn.sales-ai-btn-pdf:hover {
+
+            background: #1d4ed8;
+
+        }
+
+
+        /* ==========================================
+           DOWNLOAD BANNER
+           ========================================== */
+
+        .sales-ai-download-banner {
+
+            padding: 10px 14px;
+
+            font-size: 12px;
+
+            font-weight: 500;
+
+            border-radius: 8px;
+
+            margin: 0 16px 12px;
+
+            display: flex;
+
+            align-items: center;
+
+            gap: 8px;
+
+            animation: sales-ai-banner-in 0.25s ease;
+
+        }
+
+
+        .sales-ai-download-banner.success {
+
+            background: #052e16;
+
+            color: #4ade80;
+
+            border: 1px solid #166534;
+
+        }
+
+
+        .sales-ai-download-banner.error {
+
+            background: #450a0a;
+
+            color: #fca5a5;
+
+            border: 1px solid #991b1b;
+
+        }
+
+
+        @keyframes sales-ai-banner-in {
+
+            from { opacity: 0; transform: translateY(-6px); }
+
+            to   { opacity: 1; transform: translateY(0); }
+
+        }
+
     `;
 
 
@@ -970,6 +1148,80 @@ function showRecordingPrompt() {
 showRecordingPrompt();
 
 
+function showDownloadPicker(downloadUrls, meetingId) {
+    pendingDownloadUrls = downloadUrls;
+    pendingMeetingId = meetingId;
+
+    const status = document.querySelector(".sales-ai-status");
+    if (status) {
+        status.innerHTML = '<span class="sales-ai-dot" style="background:#60a5fa"></span> Complete';
+    }
+
+    const summaryEl = document.getElementById("sales-ai-current-summary");
+    const labelEl = summaryEl?.previousElementSibling;
+
+    if (labelEl && labelEl.classList.contains("sales-ai-label")) {
+        labelEl.textContent = "REPORT READY";
+    }
+
+    if (summaryEl) {
+        summaryEl.outerHTML = `
+            <div class="sales-ai-download-picker" id="sales-ai-download-picker">
+                <div class="sales-ai-download-icon">&#128196;</div>
+                <div class="sales-ai-download-title">Call report is ready</div>
+                <div class="sales-ai-download-subtitle">Choose a format to download</div>
+                <div class="sales-ai-download-buttons">
+                    <button class="sales-ai-download-btn sales-ai-btn-pdf"
+                            id="sales-ai-dl-pdf">PDF</button>
+                    <button class="sales-ai-download-btn"
+                            id="sales-ai-dl-text">Text</button>
+                </div>
+            </div>
+        `;
+
+        document.getElementById("sales-ai-dl-pdf")?.addEventListener("click", () => {
+            chrome.runtime.sendMessage({
+                type: "download_report",
+                url: downloadUrls.pdf,
+                filename: `sales-call-${meetingId.slice(0, 8)}.pdf`
+            });
+        });
+
+        document.getElementById("sales-ai-dl-text")?.addEventListener("click", () => {
+            chrome.runtime.sendMessage({
+                type: "download_report",
+                url: downloadUrls.text,
+                filename: `sales-call-${meetingId.slice(0, 8)}.txt`
+            });
+        });
+    }
+}
+
+
+function showDownloadBanner(type, filename) {
+    const widget = document.getElementById("sales-ai-widget");
+    if (!widget) return;
+
+    const existing = widget.querySelector(".sales-ai-download-banner");
+    if (existing) existing.remove();
+
+    const banner = document.createElement("div");
+    banner.className = `sales-ai-download-banner ${type}`;
+
+    if (type === "success") {
+        banner.textContent = `Downloaded ${filename}`;
+    } else {
+        banner.textContent = `Download failed: ${filename}`;
+    }
+
+    widget.insertBefore(banner, widget.firstChild.nextSibling);
+
+    setTimeout(() => {
+        banner.remove();
+    }, 5000);
+}
+
+
 // Backend Messages
 
 chrome.runtime.onMessage.addListener(
@@ -1001,6 +1253,32 @@ chrome.runtime.onMessage.addListener(
                 status.textContent = "Live";
                 status.style.color = "";
             }
+        }
+
+        // post-call: show download picker
+        if (message.type === "final_processing_complete") {
+            console.log("[AI] Processing complete:", message);
+
+            if (message.download_urls && message.meeting_id) {
+                showDownloadPicker(
+                    message.download_urls,
+                    message.meeting_id
+                );
+            }
+        }
+
+        // post-call: download finished
+        if (message.type === "download_complete") {
+            console.log("[AI] Download complete:", message.filename);
+
+            showDownloadBanner("success", message.filename);
+        }
+
+        // post-call: download error
+        if (message.type === "download_error") {
+            console.error("[AI] Download error:", message.error);
+
+            showDownloadBanner("error", message.error);
         }
     }
 );

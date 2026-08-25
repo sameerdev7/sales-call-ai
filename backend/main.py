@@ -8,10 +8,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
 from google import genai
 
+from fastapi.responses import Response
+
 from database import calls
 from audio_processing import process_audio
 from reconciliation.speaker_reconciliation import reconcile_speakers
 from summarization.gemini import generate_final_summary
+from reporting.generate import generate_pdf, generate_text, build_filename
 
 load_dotenv()
 
@@ -34,6 +37,50 @@ DEFAULT_SNAPSHOT_INTERVAL = 5
 @app.get("/")
 def root():
     return {"status": "Sales Call AI Backend Running."}
+
+
+@app.get("/report/{meeting_id}/pdf")
+def download_pdf(meeting_id: str):
+    doc = calls.find_one(
+        {"meeting_id": meeting_id},
+        {"final_analysis": 1},
+    )
+
+    if not doc or not doc.get("final_analysis"):
+        raise HTTPException(status_code=404, detail="Report not found.")
+
+    pdf_bytes = generate_pdf(doc["final_analysis"])
+    filename = build_filename(meeting_id, "pdf")
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
+
+
+@app.get("/report/{meeting_id}/text")
+def download_text(meeting_id: str):
+    doc = calls.find_one(
+        {"meeting_id": meeting_id},
+        {"final_analysis": 1},
+    )
+
+    if not doc or not doc.get("final_analysis"):
+        raise HTTPException(status_code=404, detail="Report not found.")
+
+    text_content = generate_text(doc["final_analysis"])
+    filename = build_filename(meeting_id, "txt")
+
+    return Response(
+        content=text_content.encode("utf-8"),
+        media_type="text/plain",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
+    )
 
 
 @app.post("/audio/upload")
@@ -60,7 +107,7 @@ async def upload_audio(
     )
 
     try:
-        print("[AUDIO] Starting FFmpeg + STT...")
+        print("[AUDIO] Starting STT...")
 
         stt_segments, stt_provider = process_audio(audio_bytes)
 
@@ -161,6 +208,10 @@ async def upload_audio(
             "stt_provider": stt_provider,
             "transcript_entries": len(final_transcript),
             "final_summary": analysis.get("executive_summary", ""),
+            "download_urls": {
+                "pdf": f"/report/{meeting_id}/pdf",
+                "text": f"/report/{meeting_id}/text",
+            },
         }
 
         websocket = active_connections.get(meeting_id)

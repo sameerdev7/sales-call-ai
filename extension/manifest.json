@@ -10,7 +10,8 @@
     "tabCapture", 
     "offscreen",
     "alarms", 
-    "activeTab"
+    "activeTab",
+    "downloads"
   ],
 
   "host_permissions": [

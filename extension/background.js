@@ -357,6 +357,64 @@ chrome.runtime.onMessage.addListener(
         if (message.type === "stop_audio_recording") {
             stopAudioRecording();
         }
+
+        // download report file
+        if (message.type === "download_report") {
+            const fullUrl = `http://127.0.0.1:8000${message.url}`;
+
+            chrome.downloads.download(
+                {
+                    url: fullUrl,
+                    filename: message.filename,
+                    saveAs: false
+                },
+                (downloadId) => {
+                    if (chrome.runtime.lastError) {
+                        console.error("[DOWNLOAD] Failed:", chrome.runtime.lastError.message);
+
+                        if (activeTabId !== null) {
+                            chrome.tabs.sendMessage(activeTabId, {
+                                type: "download_error",
+                                error: chrome.runtime.lastError.message
+                            });
+                        }
+                        return;
+                    }
+
+                    console.log("[DOWNLOAD] Started, id:", downloadId);
+
+                    const onChanged = (delta) => {
+                        if (delta.id !== downloadId) return;
+
+                        if (delta.state) {
+                            if (delta.state.current === "complete") {
+                                console.log("[DOWNLOAD] Complete:", message.filename);
+
+                                if (activeTabId !== null) {
+                                    chrome.tabs.sendMessage(activeTabId, {
+                                        type: "download_complete",
+                                        filename: message.filename
+                                    });
+                                }
+                            } else if (delta.state.current === "interrupted") {
+                                console.error("[DOWNLOAD] Interrupted");
+
+                                if (activeTabId !== null) {
+                                    chrome.tabs.sendMessage(activeTabId, {
+                                        type: "download_error",
+                                        error: "Download interrupted"
+                                    });
+                                }
+                            }
+
+                            chrome.downloads.onChanged.removeListener(onChanged);
+                        }
+                    };
+
+                    chrome.downloads.onChanged.addListener(onChanged);
+                }
+            );
+        }
  
         // audio started
         if (message.type === "audio_recording_started") {
@@ -438,7 +496,12 @@ chrome.runtime.onMessage.addListener(
 chrome.action.onClicked.addListener(async (tab) => {
     activeTabId = tab.id; 
 
-    await ensureMeetingId(tab.id);
+
+    const existing = await getActiveMeeting();
+
+    if (!existing || existing.tabId !== tab.id) {
+        await ensureMeetingId(tab.id);
+    }
     await startAudioRecording();
 })
 

@@ -5,3 +5,4 @@ python-dotenv>=1.0
 python-multipart>=0.0.9
 google-genai>=1.0
 openai>=1.40
+fpdf2>=2.8
