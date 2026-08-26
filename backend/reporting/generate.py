@@ -75,6 +75,8 @@ def _render_pdf(analysis: dict) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
+    content_width = pdf.w - pdf.l_margin - pdf.r_margin
+
     for key, label in SECTIONS:
         value = analysis.get(key)
 
@@ -85,10 +87,12 @@ def _render_pdf(analysis: dict) -> bytes:
         pdf.set_font("Helvetica", "", 10)
 
         if isinstance(value, str) and value.strip():
-            pdf.multi_cell(0, 5, value.strip())
+            pdf.set_x(pdf.l_margin)
+            pdf.multi_cell(content_width, 5, value.strip())
         elif isinstance(value, list) and value:
             for item in value:
-                pdf.multi_cell(0, 5, f"  - {item}")
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(content_width, 5, f"  - {item}")
         else:
             pdf.set_text_color(150, 150, 150)
             pdf.cell(0, 5, "(none)", new_x="LMARGIN", new_y="NEXT")
@@ -99,7 +103,6 @@ def _render_pdf(analysis: dict) -> bytes:
     buf = io.BytesIO()
     pdf.output(buf)
     return buf.getvalue()
-
 
 def generate_text(analysis: dict) -> str:
     return _render_text(analysis)
