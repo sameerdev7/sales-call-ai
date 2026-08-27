@@ -13,7 +13,7 @@ from fastapi.responses import Response
 from database import calls
 from audio_processing import process_audio
 from reconciliation.speaker_reconciliation import reconcile_speakers
-from summarization.gemini import generate_final_summary
+from summarization.gemini import generate_final_summary, generate_window_summary
 from reporting.generate import generate_pdf, generate_text, build_filename
 
 load_dotenv()
@@ -31,6 +31,20 @@ active_connections = {}
 BUFFER_SECONDS = 10
 ALLOWED_SNAPSHOT_INTERVALS = [1, 5, 10]
 DEFAULT_SNAPSHOT_INTERVAL = 5
+
+def get_segments_in_window(meeting_id: str, starts_ms: int, end_ms: int) -> list:
+    doc = calls.find_one(
+        {"meeting_id": meeting_id}, 
+        {"segments": 1}, 
+    )
+    
+    if not doc:
+        return []
+    
+    return [
+        segment for segment in doc.get("segments", [])
+        if segment.get("timestamp") is not None and starts_ms <= segment["timestamp"] < end_ms
+    ]
 
 
 # Root
@@ -181,13 +195,28 @@ async def upload_audio(
                 "recording may contain no speech."
             )
 
-        # Final Summary (from final_transcript only)
+        # Final summary - full transcript is the primary source 
+        # of truth; windowed snapshots are passed as secondary structural 
+        # context (architecture.md)
+
+        call_doc = calls.find_one(
+            {"meeting_id": meeting_id}, 
+            {"summary_snapshots": 1}, 
+        )
+        
+        window_snapshots = (
+            call_doc.get("summary_snapshots", [])
+            if call_doc
+            else []
+        )
+        
         print(
             f"[FINAL] Generating final summary from "
-            f"{len(final_transcript)} transcript entries..."
+            f"{len(final_transcript)} transcript entries and "
+            f"{len(window_snapshots)} windowed snapshots..."
         )
-
-        analysis = generate_final_summary(final_transcript)
+        
+        analysis = generate_final_summary(final_transcript, window_snapshots)
 
         calls.update_one(
             {"meeting_id": meeting_id},
@@ -229,8 +258,9 @@ async def upload_audio(
         traceback.print_exc()
         calls.update_one({"meeting_id": meeting_id}, {
             "$set": {
-                "audio_status": "error",
-                "audio_error": str(e),
+                "audio_status": "error", 
+                "audio_error": str(e), 
+                "ended_at": time.time(),
             }
         })
 
@@ -407,7 +437,7 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
 
             response = client.models.generate_content(
-                model="gemini-3.5-flash-lite",
+                model="gemini-2.5-flash-lite",
                 contents=f"""
                 You are a real-time meeting summarization assistant.
 
@@ -525,64 +555,166 @@ async def websocket_endpoint(websocket: WebSocket):
                 # though the WebSocket stays open while the
                 # recording uploads.
                 if message_type == "meeting_ended":
-                    state["meeting_ended"] = True
-
+                    tail_start_ms = int(state["last_snapshot_time"] * 1000)
+                    tail_end_ms = int(time.time() * 1000)
+                    
+                    tail_segments = get_segments_in_window(
+                        meeting_id, tail_start_ms, tail_end_ms 
+                    )
+                    
+                    tail_summary = ""
+                    
+                    if tail_segments:
+                        try:
+                            tail_summary = generate_window_summary(
+                                tail_segments
+                            )
+                            
+                        except Exception as e:
+                            print(
+                                "[SNAPSHOT] Tail window summary failed:", repr(e)
+                            )
+                            
+                        if tail_summary:
+                            tail_timestamp = int(
+                                (time.time() - state["started_at"]) * 1000
+                            )
+                            
+                            calls.update_one(
+                                {"meeting_id": meeting_id}, 
+                                {
+                                    "$push": {
+                                        "summary_snapshots": {
+                                            "timestamp": tail_timestamp, 
+                                            "window_start": tail_start_ms, 
+                                            "window_end": tail_end_ms, 
+                                            "summary": tail_summary, 
+                                            "segment_count": len(tail_segments),
+                                        }
+                                    }
+                                }
+                            )
+                            
+                            print(
+                                f"[SNAPSHOT] Saved tail window "
+                                f"({len(tail_segments)} segments)"
+                            )
+                    
+                    state["meeting_ended"] = True 
+                    
                     calls.update_one(
-                        {"meeting_id": meeting_id},
+                        {"meeting_id": meeting_id}, 
                         {"$set": {"ended_at": time.time()}},
                     )
-
+                    
                     print(
                         f"[MEET] Backend informed of meeting "
                         f"end: {meeting_id}"
                     )
-                    continue
 
                 if message_type == "transcript":
                     await handle_transcript(message)
 
             meeting_id = state["meeting_id"]
 
-            # SNAPSHOT (evaluated every tick; stopped once
-            # the meeting has ended so stale summaries are
-            # never re-saved)
+            # WINDOWED SNAPSHOT (evaluated every tick; stopped
+            # once the meeting has ended). Each snapshot is now
+            # an independent, fresh Gemini summary of ONLY the
+            # segments spoken since the previous snapshot — not
+            # a copy of the rolling current_summary, which
+            # compounds context loss over a long call
+            # (architecture.md Step 4).
             if (
                 not state["meeting_ended"]
                 and current_time - state["last_snapshot_time"]
                 >= state["snapshot_interval"] * 60
             ):
-                if state["current_summary"]:
-                    # Meeting relative timestamp in milliseconds
-                    meeting_timestamp = int(
-                        (current_time - state["started_at"]) * 1000
+                doc_ended = calls.find_one(
+                    {"meeting_id": meeting_id}, 
+                    {"ended_at": 1},
+                )
+                
+                if doc_ended and doc_ended.get("ended_at"):
+                    state["meeting_ended"] = True 
+                    print(
+                        f"[WS] Detected meeting end via Mongo "
+                        f"(meeting_ended message was likely lost) "
+                        f"for {meeting_id}"
                     )
+                    
+                    state["last_snapshot_time"] = current_time
+                    continue 
+                
+                window_start_ms = int(state["last_snapshot_time"] * 1000)
+                window_end_ms = int(current_time * 1000)
 
-                    snapshot = {
-                        "timestamp": meeting_timestamp,
-                        "summary": state["current_summary"],
-                    }
+                window_segments = get_segments_in_window(
+                    meeting_id, window_start_ms, window_end_ms
+                )
 
-                    # Persist snapshot
-                    calls.update_one(
-                        {"meeting_id": meeting_id},
-                        {
-                            "$push": {
-                                "summary_snapshots": snapshot
-                            }
+                meeting_timestamp = int(
+                    (current_time - state["started_at"]) * 1000
+                )
+
+                has_content = bool(window_segments)
+                window_summary = ""
+
+                if has_content:
+                    try:
+                        window_summary = generate_window_summary(
+                            window_segments
+                        )
+                    except Exception as e:
+                        print(
+                            "[SNAPSHOT] Window summary failed:",
+                            repr(e),
+                        )
+                        has_content = False
+
+                if not window_summary:
+                    window_summary = "No conversation in this window."
+                    has_content = False
+
+                snapshot = {
+                    "timestamp": meeting_timestamp,
+                    "window_start": window_start_ms,
+                    "window_end": window_end_ms,
+                    "summary": window_summary,
+                    "segment_count": len(window_segments),
+                }
+
+                # Always persist, even empty windows, so the
+                # final record has no gaps.
+                calls.update_one(
+                    {"meeting_id": meeting_id},
+                    {
+                        "$push": {
+                            "summary_snapshots": snapshot
+                        },
+                        "$set": {
+                            "last_snapshot_wall_time": current_time
                         }
-                    )
+                    }
+                )
 
+                # Only notify the live widget when there's real
+                # content — no point cluttering HISTORY with
+                # empty-window placeholders during the call.
+                if has_content:
                     await websocket.send_json({
                         "type": "snapshot",
                         "timestamp": meeting_timestamp,
-                        "summary": state["current_summary"],
+                        "window_start": window_start_ms,
+                        "window_end": window_end_ms,
+                        "segment_count": len(window_segments),
+                        "summary": window_summary,
                     })
 
-                    print(
-                        f"[SNAPSHOT] Saved "
-                        f"{state['snapshot_interval']}-minute "
-                        f"snapshot at {meeting_timestamp}ms"
-                    )
+                print(
+                    f"[SNAPSHOT] Saved {state['snapshot_interval']}-"
+                    f"minute window ({len(window_segments)} "
+                    f"segments) at {meeting_timestamp}ms"
+                )
 
                 state["last_snapshot_time"] = current_time
 

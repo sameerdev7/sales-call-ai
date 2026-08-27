@@ -4,7 +4,7 @@ import os
 from google import genai
 from google.genai import types
 
-FINAL_SUMMARY_MODEL = os.getenv("GEMINI_FINAL_MODEL", "gemini-3.5-flash")
+FINAL_SUMMARY_MODEL = os.getenv("GEMINI_FINAL_MODEL", "gemini-2.5-flash")
 
 _client = None
 
@@ -54,47 +54,115 @@ def format_transcript(final_transcript) -> str:
 
     return "\n".join(lines)
 
+def build_window_summary_prompt(segments) -> str:
+    lines = [
+        f"{segment.get('speaker', 'unknown')}: {segment.get('text', '')}"
+        for segment in segments
+    ]
+    
+    transcript_text = "\n".join(lines)
+    
+    return f""" 
+    You are summarizing ONE short excert of a live conversation 
+    
+    Excerpt:
+    {transcript_text}
+    
+    Instructions:
+    - Summarize ONLY what is said in this excerpt. 
+    - Do not reference any conversation outside of it.
+    - Be precise and detailed - this is a self-contaiined record of 
+    this specific time window, not a rolling summary. 
+    - Do not invent or assume information not present in the excerpt. 
+    - Return ONLY the summary text, no preamble. 
+    """
+    
+def generate_window_summary(segments) -> str: 
+    """
+    Independent, self-contained summary of a single snapshot 
+    window's raw segments - no rolling context is carried in, so fidelity does not degrade 
+    as the call gets longer. 
+    """
+    
+    if not segments:
+        return ""
+    
+    response = _get_client().models.generate_content(
+        model=os.getenv("GEMINI_WINDOW_MODEL", "gemini-2.5-flash-lite"),
+        contents = build_window_summary_prompt(segments),
+    )
+    
+    return response.text.strip() if response.text else ""
+    
 
-def build_final_summary_prompt(final_transcript) -> str:
+
+
+def format_window_snapshots(window_snapshots) -> str:
+    if not window_snapshots:
+        return "(no windowed snapshots available)"
+
+    lines = []
+    for snap in window_snapshots:
+        if not snap:
+            continue
+
+        start_s = max(0, int(snap.get("window_start", 0) / 1000))
+        end_s = max(0, int(snap.get("window_end", 0) / 1000))
+        lines.append(
+            f"[{start_s // 60:02d}:{start_s % 60:02d}"
+            f"-{end_s // 60:02d}:{end_s % 60:02d}] "
+            f"{snap.get('summary', '')}"
+        )
+
+    return "\n".join(lines) if lines else "(no windowed snapshots available)"
+
+
+def build_final_summary_prompt(final_transcript, window_snapshots=None) -> str:
     transcript_text = format_transcript(final_transcript)
+    snapshots_text = format_window_snapshots(window_snapshots or [])
 
     return f"""
 You are an expert sales-call analyst.
 
 Below is the FINAL timestamped transcript of a completed sales call.
-It is the authoritative record of the meeting.
+It is the authoritative record of the meeting — always ground your
+answer in this transcript.
 
 Transcript:
 {transcript_text}
 
+Below are independent per-window summaries generated during the
+call. Use these ONLY as secondary context to understand the call's
+topic structure and pacing — the transcript above is the source of
+truth for facts.
+
+Windowed summaries:
+{snapshots_text}
+
 Analyze the call and return ONLY a JSON object with exactly these keys:
-
-- executive_summary: string. A concise paragraph summarizing the call.
-- customer_requirements: array of strings. What the customer needs/wants.
-- pain_points: array of strings. Problems the customer is facing.
-- objections: array of strings. Concerns or pushback raised by the customer.
-- decisions: array of strings. Decisions made during the call.
-- action_items: array of strings. Tasks anyone committed to doing.
-- commitments: array of strings. Promises made by either side.
-- next_steps: array of strings. Agreed follow-ups with owners where stated.
-- important_entities: array of strings. Names of companies, products, people, tools, budgets, dates worth remembering.
-- sales_signals: array of strings. Buying signals, risk signals, or sentiment cues.
-
-Rules:
-- Base every statement strictly on the transcript. Do not invent information.
-- Use empty arrays when a category has no content in the call.
 """
 
-
-def generate_final_summary(final_transcript) -> dict:
+def generate_final_summary(final_transcript, window_snapshots=None) -> dict:
     response = _get_client().models.generate_content(
         model=FINAL_SUMMARY_MODEL,
-        contents=build_final_summary_prompt(final_transcript),
+        contents=build_final_summary_prompt(final_transcript, window_snapshots),
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
         ),
     )
 
+    if not response.text:
+        raise RuntimeError(
+            "Gemini returned an empty response for the final "
+            "summary (possibly blocked or truncated)."
+        )
+
     analysis = json.loads(response.text)
+
+    if not isinstance(analysis, dict):
+        raise RuntimeError(
+            f"Gemini final summary response was not a JSON "
+            f"object: {type(analysis)}"
+        )
 
     return {key: analysis.get(key) for key in SUMMARY_SCHEMA_KEYS}
