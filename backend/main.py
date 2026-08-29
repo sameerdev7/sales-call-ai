@@ -6,23 +6,21 @@ import traceback
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException
-from google import genai
-
 from fastapi.responses import Response
 
 from database import calls
 from audio_processing import process_audio
 from reconciliation.speaker_reconciliation import reconcile_speakers
-from summarization.gemini import generate_final_summary, generate_window_summary
+from summarization.gemini import (
+    generate_final_summary,
+    generate_window_summary,
+    get_client,
+)
 from reporting.generate import generate_pdf, generate_text, build_filename
 
 load_dotenv()
 
 app = FastAPI()
-
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
 
 # live WebSocket connections keyed by meeting_id
 active_connections = {}
@@ -51,6 +49,78 @@ def get_segments_in_window(meeting_id: str, starts_ms: int, end_ms: int) -> list
 @app.get("/")
 def root():
     return {"status": "Sales Call AI Backend Running."}
+
+
+# ==================================================
+# Debug endpoints - replay summarization against
+# existing/arbitrary data via curl, without needing
+# a live call or audio upload. Local testing only;
+# gated off unless ENABLE_DEBUG_ENDPOINTS=1.
+# ==================================================
+if os.getenv("ENABLE_DEBUG_ENDPOINTS") == "1":
+
+    @app.get("/debug/transcript/{meeting_id}")
+    def debug_get_transcript(meeting_id: str):
+        """
+        Pull whatever's already stored for a meeting - the reconciled
+        final_transcript, windowed snapshots, and raw live-caption
+        segments - so you can curl it straight into
+        /debug/final-summary or /debug/window-summary below.
+        """
+        doc = calls.find_one(
+            {"meeting_id": meeting_id},
+            {
+                "final_transcript": 1,
+                "summary_snapshots": 1,
+                "segments": 1,
+                "final_analysis": 1,
+            },
+        )
+
+        if not doc:
+            raise HTTPException(status_code=404, detail="meeting_id not found")
+
+        return {
+            "final_transcript": doc.get("final_transcript", []),
+            "window_snapshots": doc.get("summary_snapshots", []),
+            "segments": doc.get("segments", []),
+            "final_analysis": doc.get("final_analysis"),
+        }
+
+    @app.post("/debug/window-summary")
+    async def debug_window_summary(payload: dict):
+        """
+        Body: {"segments": [{"speaker": str, "text": str, "timestamp": int}, ...]}
+        Runs the exact same generate_window_summary() used live.
+        """
+        segments = payload.get("segments", [])
+
+        if not segments:
+            raise HTTPException(status_code=400, detail="segments is required and must be non-empty")
+
+        summary = generate_window_summary(segments)
+
+        return {"summary": summary, "segment_count": len(segments)}
+
+    @app.post("/debug/final-summary")
+    async def debug_final_summary(payload: dict):
+        """
+        Body: {
+            "final_transcript": [{"speaker": str, "text": str, "timestamp": int}, ...],
+            "window_snapshots": [...]   (optional)
+        }
+        Runs the exact same generate_final_summary() the real
+        /audio/upload endpoint calls at the end of a real call.
+        """
+        final_transcript = payload.get("final_transcript", [])
+        window_snapshots = payload.get("window_snapshots", [])
+
+        if not final_transcript:
+            raise HTTPException(status_code=400, detail="final_transcript is required and must be non-empty")
+
+        analysis = generate_final_summary(final_transcript, window_snapshots)
+
+        return analysis
 
 
 @app.get("/report/{meeting_id}/pdf")
@@ -436,8 +506,8 @@ async def websocket_endpoint(websocket: WebSocket):
         
         try:
 
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+            response = get_client().models.generate_content(
+                model=os.getenv("GEMINI_LIVE_MODEL", "gemini-3.7-flash"),
                 contents=f"""
                 You are a real-time meeting summarization assistant.
 
@@ -470,6 +540,15 @@ async def websocket_endpoint(websocket: WebSocket):
             print("[GEMINI] Live summary generation failed:", repr(e))
             new_summary = ""
 
+        # Always re-arm the throttle, success or failure. Only
+        # advancing it on success meant a failed call (e.g. a
+        # transient 503 from an overloaded model) left the throttle
+        # disarmed, so the very next transcript segment retried
+        # immediately instead of waiting BUFFER_SECONDS - turning a
+        # brief outage into a retry storm against an already
+        # overloaded model.
+        state["last_summary_time"] = current_time
+
         if new_summary:
             state["current_summary"] = new_summary
             print("\n[GEMINI CURRENT SUMMARY]")
@@ -495,9 +574,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 ),
             })
 
+            # Only clear the buffer on success - a failed call
+            # means this content hasn't been summarized yet, so it
+            # stays queued and gets included in the next attempt
+            # instead of being silently dropped.
             state["buffer"].clear()
-
-            state["last_summary_time"] = current_time
 
     try:
         while True:

@@ -1,5 +1,3 @@
-
-
 // Detecting the caption element
 
 // const observer = new MutationObserver((mutations) => {
@@ -32,6 +30,11 @@ let sessionEnded = false;
 
 let pendingDownloadUrls = null;
 let pendingMeetingId = null;
+
+// Persistent widget state (chrome.storage.local recovery)
+let currentMeetingId = null;
+let snapshotHistory = [];
+let isDragging = false;
 
 function startSession() {
     meetCallDetected = true;
@@ -478,6 +481,10 @@ function createWidget() {
 
             justify-content:
                 space-between;
+
+            cursor: grab;
+
+            user-select: none;
 
         }
 
@@ -1038,8 +1045,70 @@ function createWidget() {
                 toggle.textContent = "−";
                 toggle.title = "Minimize";
             }
+            persistState();
         }
     );
+
+
+    // ==================================================
+    // Drag to reposition
+    // ==================================================
+
+    const header = widget.querySelector(".sales-ai-header");
+
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    header.addEventListener("mousedown", (e) => {
+        // Don't start a drag from the minimize/expand button
+        if (e.target === toggle || toggle.contains(e.target)) {
+            return;
+        }
+
+        isDragging = true;
+        header.style.cursor = "grabbing";
+
+        const rect = widget.getBoundingClientRect();
+        dragOffsetX = e.clientX - rect.left;
+        dragOffsetY = e.clientY - rect.top;
+
+        // On first drag, switch from right-based to left-based
+        // positioning so the widget follows the cursor exactly.
+        widget.style.left = `${rect.left}px`;
+        widget.style.top = `${rect.top}px`;
+        widget.style.right = "auto";
+
+        e.preventDefault();
+    });
+
+    document.addEventListener("mousemove", (e) => {
+        if (!isDragging) {
+            return;
+        }
+
+        let newLeft = e.clientX - dragOffsetX;
+        let newTop = e.clientY - dragOffsetY;
+
+        // Keep the widget fully on-screen
+        const maxLeft = Math.max(0, window.innerWidth - widget.offsetWidth);
+        const maxTop = Math.max(0, window.innerHeight - widget.offsetHeight);
+
+        newLeft = Math.min(Math.max(0, newLeft), maxLeft);
+        newTop = Math.min(Math.max(0, newTop), maxTop);
+
+        widget.style.left = `${newLeft}px`;
+        widget.style.top = `${newTop}px`;
+    });
+
+    document.addEventListener("mouseup", () => {
+        if (!isDragging) {
+            return;
+        }
+
+        isDragging = false;
+        header.style.cursor = "grab";
+        persistState();
+    });
 
 
     // Snapshot buttons
@@ -1079,6 +1148,171 @@ function createWidget() {
 
         });
 
+
+    // ==================================================
+    // Recovery: rehydrate widget state after a page
+    // reload / navigation while the backend was still
+    // processing (or mid-call).
+    // ==================================================
+
+    chrome.storage.local.get("sales_ai_recovery", (result) => {
+        if (chrome.runtime.lastError) {
+            console.error(
+                "[AI] Failed to read recovery state:",
+                chrome.runtime.lastError
+            );
+            return;
+        }
+
+        if (result && result.sales_ai_recovery) {
+            restoreWidget(result.sales_ai_recovery);
+        }
+    });
+
+}
+
+
+// ==================================================
+// Persist / restore widget state across reloads
+// ==================================================
+
+// Recovery state older than this is treated as an abandoned
+// call and discarded on load rather than restored — long enough
+// to cover "I'll download it later today," short enough that it
+// doesn't haunt tomorrow's meetings.
+const RECOVERY_TTL_MS = 3 * 60 * 60 * 1000; // 3 hours
+
+
+function persistState() {
+    const widget = document.getElementById("sales-ai-widget");
+    if (!widget) {
+        return;
+    }
+
+    const summaryEl = document.getElementById("sales-ai-current-summary");
+    const currentSummaryText = summaryEl ? summaryEl.textContent : "";
+
+    const state = {
+        meetingId: currentMeetingId,
+        savedAt: Date.now(),
+        summary: currentSummaryText,
+        snapshots: snapshotHistory,
+        completed: !!pendingDownloadUrls,
+        downloadUrls: pendingDownloadUrls,
+        position: {
+            left: widget.style.left || null,
+            top: widget.style.top || null
+        },
+        minimized: widgetMinimized
+    };
+
+    chrome.storage.local.set({ sales_ai_recovery: state }, () => {
+        if (chrome.runtime.lastError) {
+            console.error(
+                "[AI] Failed to persist state:",
+                chrome.runtime.lastError
+            );
+        }
+    });
+}
+
+
+function restoreWidget(state) {
+    if (!state) {
+        return;
+    }
+
+    if (state.savedAt && (Date.now() - state.savedAt > RECOVERY_TTL_MS)) {
+        console.log(
+            "[AI] Discarding stale recovery state (older than TTL):",
+            state
+        );
+        chrome.storage.local.remove("sales_ai_recovery");
+        return;
+    }
+
+    console.log("[AI] Restoring widget from saved state:", state);
+
+    if (state.meetingId) {
+        currentMeetingId = state.meetingId;
+        pendingMeetingId = state.meetingId;
+    }
+
+    if (state.summary) {
+        updateCurrentSummary(state.summary);
+    }
+
+    if (Array.isArray(state.snapshots) && state.snapshots.length) {
+        snapshotHistory = [];
+        state.snapshots.forEach((snap) => {
+            addSnapshotToHistory(snap.summary, snap.timestamp);
+        });
+    }
+
+    const widget = document.getElementById("sales-ai-widget");
+
+    if (widget && state.position && state.position.left && state.position.top) {
+        widget.style.left = state.position.left;
+        widget.style.top = state.position.top;
+        widget.style.right = "auto";
+    }
+
+    if (state.minimized) {
+        const toggle = document.getElementById("sales-ai-toggle");
+        if (widget && toggle) {
+            widgetMinimized = true;
+            widget.classList.add("sales-ai-minimized");
+            toggle.textContent = "+";
+            toggle.title = "Expand";
+        }
+    }
+
+    // Restoring completed state takes priority over the plain
+    // summary restore above — swap in the download picker.
+    if (state.completed && state.downloadUrls) {
+        showDownloadPicker(state.downloadUrls, state.meetingId);
+    }
+}
+
+
+function resetWidgetToDefault() {
+    const picker = document.getElementById("sales-ai-download-picker");
+
+    if (picker) {
+        picker.outerHTML = `
+            <div
+                id="sales-ai-current-summary"
+                class="sales-ai-current-summary"
+            >
+                Waiting for conversation...
+            </div>
+        `;
+    }
+
+    const labelEl =
+        document.getElementById("sales-ai-current-summary")
+            ?.previousElementSibling;
+
+    if (labelEl && labelEl.classList.contains("sales-ai-label")) {
+        labelEl.textContent = "CURRENT SUMMARY";
+    }
+
+    const status = document.querySelector(".sales-ai-status");
+    if (status) {
+        status.innerHTML =
+            '<span class="sales-ai-dot"></span> Live';
+    }
+
+    const timeline = document.getElementById("sales-ai-timeline");
+    if (timeline) {
+        timeline.innerHTML =
+            '<div class="sales-ai-empty">No snapshots yet.</div>';
+    }
+
+    snapshotHistory = [];
+    pendingDownloadUrls = null;
+    pendingMeetingId = null;
+    currentMeetingId = null;
 }
 
 
@@ -1111,6 +1345,8 @@ function updateCurrentSummary(summary) {
 // Add History Snapshot 
 
 function addSnapshotToHistory(summary, timestamp) {
+    snapshotHistory.push({ summary, timestamp });
+
     const timeline = document.getElementById("sales-ai-timeline");
     if (!timeline) {
         return;
@@ -1229,10 +1465,22 @@ chrome.runtime.onMessage.addListener(
 
         // Content summary
 
+        // meeting id assigned by the backend — needed to key
+        // the recovery state to this specific meeting
+        if (message.type === "meeting_started") {
+            console.log("[AI] Meeting started:", message.meeting_id);
+
+            currentMeetingId = message.meeting_id;
+            pendingMeetingId = message.meeting_id;
+
+            persistState();
+        }
+
         if (message.type === "summary") {
             console.log("[AI CURRENT SUMMARY]", message.summary);
 
             updateCurrentSummary(message.summary);
+            persistState();
         }
 
         // snapshot
@@ -1245,6 +1493,7 @@ chrome.runtime.onMessage.addListener(
                 message.summary,
                 message.timestamp
             );
+            persistState();
         }
 
         if (message.type === "audio_recording_started") {
@@ -1252,6 +1501,15 @@ chrome.runtime.onMessage.addListener(
             if (status) {
                 status.textContent = "Live";
                 status.style.color = "";
+            }
+
+            // A brand new recording just began. If the widget was
+            // still showing a leftover "report ready" picker from a
+            // previous, undownloaded meeting, clear it now instead
+            // of waiting for meeting_started — closes the gap where
+            // stale state could otherwise linger on screen.
+            if (pendingDownloadUrls) {
+                resetWidgetToDefault();
             }
         }
 
@@ -1264,6 +1522,7 @@ chrome.runtime.onMessage.addListener(
                     message.download_urls,
                     message.meeting_id
                 );
+                persistState();
             }
         }
 
@@ -1272,6 +1531,21 @@ chrome.runtime.onMessage.addListener(
             console.log("[AI] Download complete:", message.filename);
 
             showDownloadBanner("success", message.filename);
+
+            // Recovery is only needed until the report is
+            // safely downloaded — clear it and reset the
+            // widget so a stale meeting can't be restored
+            // into a future call.
+            chrome.storage.local.remove("sales_ai_recovery", () => {
+                if (chrome.runtime.lastError) {
+                    console.error(
+                        "[AI] Failed to clear recovery state:",
+                        chrome.runtime.lastError
+                    );
+                }
+            });
+
+            resetWidgetToDefault();
         }
 
         // post-call: download error

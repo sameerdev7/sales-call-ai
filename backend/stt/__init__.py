@@ -1,12 +1,16 @@
 import os
 
-VALID_PROVIDERS = ("openai", "ollama")
+VALID_PROVIDERS = ("openai", "gemini", "ollama")
 
 
 def _build(name):
     if name == "openai":
         from .openai_provider import OpenAIDiarizedProvider
         return OpenAIDiarizedProvider()
+
+    if name == "gemini":
+        from .gemini_provider import GeminiTranscribeProvider
+        return GeminiTranscribeProvider()
 
     if name == "ollama":
         from .ollama_provider import OllamaChunkedProvider
@@ -22,19 +26,28 @@ def resolve_stt_chain():
     """
     Ordered provider chain.
 
-    STT_PROVIDER=openai|ollama  -> forced, single provider
-    unset (auto)                -> openai first when a key exists,
-                                   ollama always as fallback
+    STT_PROVIDER=openai|gemini|ollama  -> forced, single provider
+    unset (auto)                       -> gemini first when a key
+                                           exists, then openai when a
+                                           key exists, ollama always
+                                           as final fallback
     """
     explicit = (os.getenv("STT_PROVIDER") or "").strip().lower()
 
     if explicit:
         return [explicit]
 
-    if os.getenv("OPENAI_API_KEY"):
-        return ["openai", "ollama"]
+    chain = []
 
-    return ["ollama"]
+    if os.getenv("GEMINI_API_KEY"):
+        chain.append("gemini")
+
+    if os.getenv("OPENAI_API_KEY"):
+        chain.append("openai")
+
+    chain.append("ollama")
+
+    return chain
 
 
 def transcribe_with_fallback(audio_path: str):

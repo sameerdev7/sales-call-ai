@@ -203,10 +203,13 @@ async function ensureOffscreenDocument() {
     await chrome.offscreen.createDocument({
         url: "offscreen.html",
         reasons: [
-            "USER_MEDIA"
+            "USER_MEDIA",
+            "AUDIO_PLAYBACK"
         ],
         justification:
-            "Record Google Meet audio locally for post-call transcription."
+            "Record Google Meet audio locally for post-call transcription, " +
+            "and play the captured tab audio back out so the user keeps " +
+            "hearing the call while it is being recorded."
     });
 
 }
@@ -362,6 +365,21 @@ chrome.runtime.onMessage.addListener(
         if (message.type === "download_report") {
             const fullUrl = `http://127.0.0.1:8000${message.url}`;
 
+            // Capture the requesting tab now, at message-receipt time.
+            // The module-level activeTabId is unreliable here: MV3
+            // service workers are evicted after ~30s idle and reset
+            // it to null on restart. Since the click happens well
+            // after that window (call already ended), activeTabId is
+            // frequently null again by the time onChanged fires,
+            // which was silently dropping download_complete/
+            // download_error and leaving the widget's recovery state
+            // stuck forever. sender.tab.id is stable for this whole
+            // closure regardless of SW eviction in between.
+            const requestingTabId =
+                (sender.tab && sender.tab.id !== undefined)
+                    ? sender.tab.id
+                    : activeTabId;
+
             chrome.downloads.download(
                 {
                     url: fullUrl,
@@ -372,8 +390,8 @@ chrome.runtime.onMessage.addListener(
                     if (chrome.runtime.lastError) {
                         console.error("[DOWNLOAD] Failed:", chrome.runtime.lastError.message);
 
-                        if (activeTabId !== null) {
-                            chrome.tabs.sendMessage(activeTabId, {
+                        if (requestingTabId !== null) {
+                            chrome.tabs.sendMessage(requestingTabId, {
                                 type: "download_error",
                                 error: chrome.runtime.lastError.message
                             });
@@ -390,8 +408,8 @@ chrome.runtime.onMessage.addListener(
                             if (delta.state.current === "complete") {
                                 console.log("[DOWNLOAD] Complete:", message.filename);
 
-                                if (activeTabId !== null) {
-                                    chrome.tabs.sendMessage(activeTabId, {
+                                if (requestingTabId !== null) {
+                                    chrome.tabs.sendMessage(requestingTabId, {
                                         type: "download_complete",
                                         filename: message.filename
                                     });
@@ -399,8 +417,8 @@ chrome.runtime.onMessage.addListener(
                             } else if (delta.state.current === "interrupted") {
                                 console.error("[DOWNLOAD] Interrupted");
 
-                                if (activeTabId !== null) {
-                                    chrome.tabs.sendMessage(activeTabId, {
+                                if (requestingTabId !== null) {
+                                    chrome.tabs.sendMessage(requestingTabId, {
                                         type: "download_error",
                                         error: "Download interrupted"
                                     });

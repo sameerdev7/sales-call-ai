@@ -4,12 +4,12 @@ import os
 from google import genai
 from google.genai import types
 
-FINAL_SUMMARY_MODEL = os.getenv("GEMINI_FINAL_MODEL", "gemini-2.5-flash")
+FINAL_SUMMARY_MODEL = os.getenv("GEMINI_FINAL_MODEL", "gemini-3.1-pro-preview")
 
 _client = None
 
 
-def _get_client():
+def get_client():
     global _client
 
     if _client is None:
@@ -23,6 +23,10 @@ def _get_client():
         _client = genai.Client(api_key=api_key)
 
     return _client
+
+
+# Backwards-compatible alias (internal callers within this module).
+_get_client = get_client
 
 
 SUMMARY_SCHEMA_KEYS = [
@@ -88,7 +92,7 @@ def generate_window_summary(segments) -> str:
         return ""
     
     response = _get_client().models.generate_content(
-        model=os.getenv("GEMINI_WINDOW_MODEL", "gemini-2.5-flash-lite"),
+        model=os.getenv("GEMINI_WINDOW_MODEL", "gemini-3.1-pro-preview"),
         contents = build_window_summary_prompt(segments),
     )
     

@@ -1,5 +1,7 @@
 let mediaStream = null;
 let mediaRecorder = null;
+let audioContext = null;
+let loopbackSource = null;
 
 let audioChunks = [];
 
@@ -30,6 +32,17 @@ async function startRecording(streamId) {
             video: false
         });
         console.log("[AUDIO] Media stream acquired.");
+
+        // chrome.tabCapture takes exclusive ownership of the tab's
+        // audio the moment getUserMedia grabs it — Chrome stops
+        // routing it to the speakers unless we explicitly play it
+        // back out ourselves. Without this, the recording user goes
+        // silent on the Meet tab (including hearing the other
+        // participant) the instant recording starts, even though
+        // the captured stream itself still has their audio in it.
+        audioContext = new AudioContext();
+        loopbackSource = audioContext.createMediaStreamSource(mediaStream);
+        loopbackSource.connect(audioContext.destination);
 
         audioChunks = [];
 
@@ -78,6 +91,16 @@ async function startRecording(streamId) {
             });
 
             audioChunks = [];
+
+            if (loopbackSource) {
+                loopbackSource.disconnect();
+                loopbackSource = null;
+            }
+
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
 
             if (mediaStream) {
                 mediaStream.getTracks().forEach(track => track.stop());
