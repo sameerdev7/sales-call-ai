@@ -1,5 +1,6 @@
 let socket = null;
 let activeTabId = null;
+let reconnectTimer = null;
 
 let recording = false;
 
@@ -89,11 +90,25 @@ async function clearRecordingStartedAt() {
 
 
 function connectWebSocket() {
+    // Guard against redundant connects within a single service-
+    // worker execution: if a socket is already open or in the
+    // middle of connecting, do nothing. This alone can't stop a
+    // torn-down/respawned service worker from opening a fresh
+    // socket (that's a brand new JS context with socket === null,
+    // so there's nothing here to guard against) - see the
+    // provisional-connection reaper on the backend for the other
+    // half of this fix.
+    if (
+        socket &&
+        (socket.readyState === WebSocket.OPEN ||
+            socket.readyState === WebSocket.CONNECTING)
+    ) {
+        return;
+    }
 
     console.log("[BG] Connecting to backend...");
 
-
-    socket =new WebSocket("ws://127.0.0.1:8000/ws");
+    socket = new WebSocket("ws://127.0.0.1:8000/ws");
     socket.onopen = () => {
         console.log(
             "[BG] Connected to backend"
@@ -152,7 +167,18 @@ function connectWebSocket() {
 
         socket = null;
 
-        setTimeout(connectWebSocket, 2000);
+        // Clear any reconnect already scheduled from a previous
+        // close before scheduling a new one, so rapid open/close
+        // churn can't stack multiple pending reconnect timers on
+        // top of each other.
+        if (reconnectTimer !== null) {
+            clearTimeout(reconnectTimer);
+        }
+
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectWebSocket();
+        }, 2000);
     };
 
 
@@ -164,7 +190,17 @@ function connectWebSocket() {
 connectWebSocket();
 
 if (chrome.alarms) {
-    chrome.alarms.create("keepalive", { periodInMinutes: 0.4 });
+    // Chrome clamps chrome.alarms periodInMinutes below 1 minute
+    // for most installs, so a 0.4-minute request likely wasn't
+    // actually giving a 24s heartbeat - it's silently running
+    // slower than intended. Setting it to the real floor here so
+    // the code matches what's actually happening, rather than
+    // relying on a sub-minute interval that isn't guaranteed.
+    // This alone doesn't prevent MV3 service-worker teardown
+    // between alarms - the guard in connectWebSocket() and the
+    // provisional-connection reaper on the backend are what make
+    // that churn harmless instead of trying to fully prevent it.
+    chrome.alarms.create("keepalive", { periodInMinutes: 1 });
 
     chrome.alarms.onAlarm.addListener((alarm) => {
         if (alarm.name === "keepalive") {

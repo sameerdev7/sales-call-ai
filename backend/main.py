@@ -30,6 +30,16 @@ BUFFER_SECONDS = 10
 ALLOWED_SNAPSHOT_INTERVALS = [1, 5, 10]
 DEFAULT_SNAPSHOT_INTERVAL = 5
 
+# A connection that never progresses past "provisional" (no
+# transcript/session ever arrives on it - e.g. the extension's
+# service worker was torn down and respawned before recording
+# actually started) is proactively closed after this long, instead
+# of being left open forever. Without this, a churning MV3 service
+# worker piles up an unbounded number of zombie connections, each
+# with its own throwaway meeting_id, since nothing ever tells the
+# server the old one is abandoned.
+PROVISIONAL_CONNECTION_TIMEOUT_SECONDS = 45
+
 def get_segments_in_window(meeting_id: str, starts_ms: int, end_ms: int) -> list:
     doc = calls.find_one(
         {"meeting_id": meeting_id}, 
@@ -593,6 +603,28 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = None
 
             current_time = time.time()
+
+            # Reap connections that never progressed past
+            # provisional. A real session sets doc_created=True
+            # (either a transcript arrives, or the extension
+            # re-adopts an existing meeting_id after a reconnect) -
+            # if neither has happened within the grace window, this
+            # connection is a leftover from something like a
+            # respawned service worker that never sent anything,
+            # and should be closed rather than held open forever.
+            if (
+                not state["doc_created"]
+                and current_time - state["started_at"]
+                > PROVISIONAL_CONNECTION_TIMEOUT_SECONDS
+            ):
+                print(
+                    f"[WS] Closing idle provisional connection "
+                    f"{state['meeting_id']} (no session started "
+                    f"within {PROVISIONAL_CONNECTION_TIMEOUT_SECONDS}s)"
+                )
+                active_connections.pop(state["meeting_id"], None)
+                await websocket.close()
+                return
 
             if message is not None:
                 message_type = message.get("type")
