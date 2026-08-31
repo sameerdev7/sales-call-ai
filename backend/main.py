@@ -175,6 +175,105 @@ def download_text(meeting_id: str):
             "Content-Disposition": f'attachment; filename="{filename}"'
         },
     )
+    
+async def _finalize_report(meeting_id: str, caption_segments: list, audio_transcript: list, window_snapshots: list, source: str) -> dict:
+    """
+    Shared final-summary path. `caption_segments` (raw Meet live
+    captions) is always passed. `audio_transcript` (STT-reconciled)
+    is passed too when available - Gemini uses both as cross-
+    checking witnesses. `source` is "audio+captions", "audio", or
+    "captions" (captions-only fallback when audio was never
+    recorded or the audio pipeline failed).
+    """
+    analysis = generate_final_summary(
+        caption_segments,
+        audio_transcript=audio_transcript or None,
+        window_snapshots=window_snapshots,
+    )
+
+    calls.update_one(
+        {"meeting_id": meeting_id},
+        {
+            "$set": {
+                "audio_status": "completed",
+                "ended_at": time.time(),
+                "final_summary": analysis.get("executive_summary", ""),
+                "final_analysis": analysis,
+                "final_summary_source": source,
+            }
+        }
+    )
+
+    result = {
+        "type": "final_processing_complete",
+        "meeting_id": meeting_id,
+        "status": "completed",
+        "source": source,
+        "download_urls": {
+            "pdf": f"/report/{meeting_id}/pdf",
+            "text": f"/report/{meeting_id}/text",
+        },
+        "final_summary": analysis.get("executive_summary", ""),
+    }
+
+    websocket = active_connections.get(meeting_id)
+    if websocket is not None:
+        try:
+            await websocket.send_json(result)
+        except Exception as e:
+            print("[WS] Failed to push final results:", repr(e))
+
+    return result
+
+
+@app.post("/report/{meeting_id}/generate")
+async def generate_report_fallback(meeting_id: str):
+    """
+    Generates the final report from whatever's already stored for
+    this meeting. Uses the audio transcript + captions together when
+    both exist; falls back to captions-only when audio was never
+    recorded or the audio pipeline failed. Idempotent - if a report
+    already exists it's returned as-is.
+    """
+    doc = calls.find_one(
+        {"meeting_id": meeting_id},
+        {"final_analysis": 1, "final_transcript": 1, "segments": 1, "summary_snapshots": 1},
+    )
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="meeting_id not found")
+
+    if doc.get("final_analysis"):
+        analysis = doc["final_analysis"]
+        return {
+            "type": "final_processing_complete",
+            "meeting_id": meeting_id,
+            "status": "completed",
+            "final_summary": analysis.get("executive_summary", ""),
+            "download_urls": {
+                "pdf": f"/report/{meeting_id}/pdf",
+                "text": f"/report/{meeting_id}/text",
+            },
+        }
+
+    audio_transcript = doc.get("final_transcript") or []
+    caption_segments = doc.get("segments") or []
+
+    if audio_transcript:
+        source = "audio+captions" if caption_segments else "audio"
+    elif caption_segments:
+        source = "captions"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="No transcript or caption data available for this meeting yet.",
+        )
+
+    window_snapshots = doc.get("summary_snapshots", [])
+
+    return await _finalize_report(
+        meeting_id, caption_segments, audio_transcript, window_snapshots, source=source
+    )
 
 
 @app.post("/audio/upload")
@@ -275,76 +374,68 @@ async def upload_audio(
                 "recording may contain no speech."
             )
 
-        # Final summary - full transcript is the primary source 
-        # of truth; windowed snapshots are passed as secondary structural 
-        # context (architecture.md)
-
+        # Final summary - both the audio transcript AND the raw
+        # Meet caption segments are used together when both exist
+        # (architecture.md)
         call_doc = calls.find_one(
-            {"meeting_id": meeting_id}, 
-            {"summary_snapshots": 1}, 
+            {"meeting_id": meeting_id},
+            {"summary_snapshots": 1, "segments": 1},
         )
-        
         window_snapshots = (
             call_doc.get("summary_snapshots", [])
             if call_doc
             else []
         )
-        
+        caption_segments = (
+            call_doc.get("segments", [])
+            if call_doc
+            else []
+        )
+
         print(
             f"[FINAL] Generating final summary from "
-            f"{len(final_transcript)} transcript entries and "
+            f"{len(final_transcript)} audio-transcript entries, "
+            f"{len(caption_segments)} caption segments, and "
             f"{len(window_snapshots)} windowed snapshots..."
         )
-        
-        analysis = generate_final_summary(final_transcript, window_snapshots)
 
-        calls.update_one(
-            {"meeting_id": meeting_id},
-            {
-                "$set": {
-                    "audio_status": "completed",
-                    "ended_at": time.time(),
-                    "final_summary": analysis.get("executive_summary", ""),
-                    "final_analysis": analysis,
-                }
-            }
+        result = await _finalize_report(
+            meeting_id, caption_segments, final_transcript, window_snapshots,
+            source="audio+captions" if caption_segments else "audio",
         )
-
-        result = {
-            "type": "final_processing_complete",
-            "meeting_id": meeting_id,
-            "status": "completed",
-            "stt_provider": stt_provider,
-            "transcript_entries": len(final_transcript),
-            "final_summary": analysis.get("executive_summary", ""),
-            "download_urls": {
-                "pdf": f"/report/{meeting_id}/pdf",
-                "text": f"/report/{meeting_id}/text",
-            },
-        }
-
-        websocket = active_connections.get(meeting_id)
-
-        if websocket is not None:
-            try:
-                await websocket.send_json(result)
-            except Exception as e:
-                print("[WS] Failed to push final results:", repr(e))
 
         return result
 
     except Exception as e:
         print("[AUDIO] Processing failed:", repr(e))
         traceback.print_exc()
+
         calls.update_one({"meeting_id": meeting_id}, {
             "$set": {
-                "audio_status": "error", 
-                "audio_error": str(e), 
-                "ended_at": time.time(),
+                "audio_status": "error",
+                "audio_error": str(e),
             }
         })
 
-        raise HTTPException(status_code=500, detail=str(e))
+        # Audio pipeline failed (STT, reconciliation, or the final
+        # summary call) - fall back to the raw Meet caption segments
+        # so a report still gets produced instead of nothing at all.
+        fallback_doc = calls.find_one(
+            {"meeting_id": meeting_id}, {"segments": 1, "summary_snapshots": 1}
+        )
+        fallback_segments = (fallback_doc or {}).get("segments", [])
+
+        if fallback_segments:
+            try:
+                return await _finalize_report(
+                    meeting_id,
+                    fallback_segments,
+                    None,
+                    (fallback_doc or {}).get("summary_snapshots", []),
+                    source="captions_fallback",
+                )
+            except Exception as fallback_error:
+                print("[AUDIO] Captions fallback also failed:", repr(fallback_error))
 
 # Web Socket
 @app.websocket("/ws")

@@ -31,6 +31,49 @@ async function getActiveMeeting() {
     return result[ACTIVE_MEETING_KEY] || null;
 }
 
+async function requestFallbackReport() {
+    const active = await getActiveMeeting();
+
+    if (!active || !active.meetingId) {
+        console.error("[REPORT] No active meeting ID available for fallback report");
+        return;
+    }
+
+    const meetingId = active.meetingId;
+
+    console.log("[REPORT] Requesting captions-based report for", meetingId);
+
+    try {
+        const response = await fetch(
+            `http://127.0.0.1:8000/report/${meetingId}/generate`,
+            { method: "POST" }
+        );
+
+        if (!response.ok) {
+            throw new Error(`Fallback report failed: ${response.status}`);
+        }
+
+        const result = await response.json();
+        console.log("[REPORT] Fallback report ready:", result);
+
+        await clearActiveMeeting(meetingId);
+
+        if (activeTabId !== null) {
+            chrome.tabs.sendMessage(activeTabId, result);
+        }
+
+    } catch (error) {
+        console.error("[REPORT] Fallback report error:", error);
+
+        if (activeTabId !== null) {
+            chrome.tabs.sendMessage(activeTabId, {
+                type: "audio_recording_error",
+                error: `No report could be generated: ${error.message}`
+            });
+        }
+    }
+}
+
 async function ensureMeetingId(tabId) {
     const existing = await getActiveMeeting();
 
@@ -521,7 +564,7 @@ chrome.runtime.onMessage.addListener(
             }
         }
 
-        if (message.type === "meet_session_ended") {
+                if (message.type === "meet_session_ended") {
             console.log("[MEET] Session ended");
 
             // Tell the backend the meeting is over so live
@@ -540,7 +583,18 @@ chrome.runtime.onMessage.addListener(
                 }
             });
 
-            stopAudioRecording();
+            if (recording) {
+                stopAudioRecording();
+            } else {
+                // No audio was ever recorded for this meeting -
+                // nothing to upload, so fall back to generating the
+                // report straight from the raw Meet caption segments.
+                console.log(
+                    "[MEET] No audio recording for this meeting; " +
+                    "requesting captions-based report instead"
+                );
+                requestFallbackReport();
+            }
         }
 
     }
@@ -629,14 +683,7 @@ async function uploadAudio(audioBase64) {
     } catch (error) {
         console.error("[AUDIO] Upload error:", error);
 
-        if (activeTabId !== null) {
-            chrome.tabs.sendMessage(
-                activeTabId,
-                {
-                    type: "audio_recording_error",
-                    error: error.message
-                }
-            );
-        }
+        console.log("[AUDIO] Falling back to captions-based report");
+        await requestFallbackReport();
     }
 }
